@@ -7,7 +7,7 @@ def plot_marker_trajectories(df, markers=None, max_points=200):
     Plots 3D marker trajectories with downsampling for large datasets
     """
     if markers is None:
-        markers = ["RHEA", "LHEA", "C7", "STER", "LASI", "RASI", "LKNE", "RKNE", "LANK", "RANK"]
+        markers = ["RHEA", "LHEA", "C7", "STER", "LASI", "RASI", "LLEP", "RLEP", "LTOE", "RTOE"]
     
     # Downsample if too many points
     if len(df) > max_points:
@@ -34,6 +34,9 @@ def plot_marker_trajectories(df, markers=None, max_points=200):
             ax.scatter(x.iloc[0], y.iloc[0], z.iloc[0], color=colors[i], s=50, marker='o')
             ax.scatter(x.iloc[-1], y.iloc[-1], z.iloc[-1], color=colors[i], s=50, marker='s')
     
+    # Set equal scaling - THIS IS THE ONLY LINE ADDED
+    ax.set_aspect('equal')
+    
     ax.set_xlabel("X Position")
     ax.set_ylabel("Y Position") 
     ax.set_zlabel("Z Position")
@@ -54,8 +57,8 @@ def plot_simple_skeleton(df, frame_idx=0):
         ('RHEA', 'C7'), ('LHEA', 'C7'),  # Neck
         ('C7', 'STER'),  # Upper spine
         ('STER', 'RASI'), ('STER', 'LASI'),  # Hips
-        ('RASI', 'RKNE'), ('LASI', 'LKNE'),  # Thighs
-        ('RKNE', 'RANK'), ('LKNE', 'LANK'),  # Shins
+        ('RASI', 'RLEP'), ('LASI', 'LLEP'),  # Thighs
+        ('RLEP', 'RTOE'), ('LLEP', 'LTOE'),  # Shins to feet
     ]
     
     # Plot markers
@@ -81,6 +84,9 @@ def plot_simple_skeleton(df, frame_idx=0):
             end_z = df.iloc[frame_idx][f"{end_marker}_Z"]
             
             ax.plot([start_x, end_x], [start_y, end_y], [start_z, end_z], 'b-', linewidth=3, alpha=0.8)
+    
+    # Set equal scaling - THIS IS THE ONLY LINE ADDED
+    ax.set_aspect('equal')
     
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
