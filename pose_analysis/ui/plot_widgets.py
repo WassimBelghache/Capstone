@@ -18,8 +18,21 @@ class AnglePlotCanvas(FigureCanvas):
         self.right_data: List[float] = []
         self.max_points = 500
 
+        # Create persistent line objects (much faster than clearing/replotting).
+        (self.left_line,) = self.ax.plot([], [], label="Left", linewidth=2)
+        (self.right_line,) = self.ax.plot([], [], label="Right", linewidth=2)
+
+        self.ax.set_xlabel("Frame", fontsize=11)
+        self.ax.set_ylabel(self.ylabel, fontsize=11)
+        self.ax.set_title(self.title, fontsize=13, fontweight="bold")
+        self.ax.legend(loc="upper right", fontsize=9)
+        self.ax.grid(True, alpha=0.3)
+
     def update_plot(self, left_value: float, right_value: float, ylim: tuple = (0, 180)):
-        """Update plot with new data point."""
+        """Update plot with new data point.
+
+        Note: this uses persistent line objects + draw_idle() for speed.
+        """
         from config import ProcessingConfig
 
         self.left_data.append(left_value)
@@ -38,16 +51,17 @@ class AnglePlotCanvas(FigureCanvas):
             self.right_data, ProcessingConfig.GRAPH_SMOOTHING_WINDOW
         )
 
-        # Redraw
-        self.ax.cla()
-        self.ax.plot(left_smooth, label="Left", color="red", linewidth=2)
-        self.ax.plot(right_smooth, label="Right", color="magenta", linewidth=2)
+        # Update lines
+        x = list(range(len(left_smooth)))
+        self.left_line.set_data(x, left_smooth)
+        self.right_line.set_data(x, right_smooth)
 
-        self.ax.set_xlabel("Frame", fontsize=11)
+        # Keep labels/titles in sync
         self.ax.set_ylabel(self.ylabel, fontsize=11)
         self.ax.set_title(self.title, fontsize=13, fontweight="bold")
-        self.ax.legend(loc="upper right", fontsize=9)
-        self.ax.grid(True, alpha=0.3)
+
+        # X-limits
+        self.ax.set_xlim(0, max(1, len(x) - 1))
 
         # Dynamic y-limits
         all_data = left_smooth + right_smooth
@@ -56,7 +70,8 @@ class AnglePlotCanvas(FigureCanvas):
             ymax = min(ylim[1], max(all_data) + 5)
             self.ax.set_ylim(ymin, ymax)
 
-        self.draw()
+        # draw_idle() lets Qt batch repaints; much smoother than draw() per frame.
+        self.draw_idle()
 
     def _smooth(self, data: List[float], window: int) -> List[float]:
         """Apply moving average smoothing."""
@@ -74,8 +89,11 @@ class AnglePlotCanvas(FigureCanvas):
         """Clear all data."""
         self.left_data.clear()
         self.right_data.clear()
-        self.ax.cla()
-        self.draw()
+        self.left_line.set_data([], [])
+        self.right_line.set_data([], [])
+        self.ax.set_xlim(0, 1)
+        self.ax.set_ylim(0, 1)
+        self.draw_idle()
 
 
 class HipAngleCanvas(AnglePlotCanvas):

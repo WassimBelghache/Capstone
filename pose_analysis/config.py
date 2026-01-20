@@ -85,6 +85,10 @@ class ProcessingConfig:
     SMOOTHING_FACTOR = 0.7
     HISTORY_SIZE = 10
     GRAPH_SMOOTHING_WINDOW = 5
+
+    # UI performance: update Matplotlib graphs every N frames (1 = every frame).
+    # Increasing this (e.g., 2-5) makes playback much smoother.
+    GRAPH_UPDATE_EVERY_N_FRAMES = 3
     
 
     DEFAULT_FPS = 30.0

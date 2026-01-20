@@ -45,10 +45,16 @@ class PoseAnalysisGUI(QtWidgets.QWidget):
         self.cap: Optional[cv2.VideoCapture] = None
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self._playback_tick)
+        # Playback clock to keep video speed close to source FPS even if processing is slow.
+        self.playback_clock = QtCore.QElapsedTimer()
         self.current_frame_idx = 0
         self.current_frame_data: Optional[np.ndarray] = None
         self.csv_data: Dict[int, dict] = {}
         self.source_fps = 30.0
+
+        # Throttle graph updates to avoid slowing video playback.
+        self._graph_frame_counter = 0
+        self._graph_frame_counter = 0
         
         # Real-time processing
         self.detector: Optional[PoseDetector] = None
@@ -245,8 +251,12 @@ class PoseAnalysisGUI(QtWidgets.QWidget):
             self.cap = cv2.VideoCapture(self.video_path)
             self.source_fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
             self.current_frame_idx = 0
+
+            self.playback_clock.restart()
+            self._graph_frame_counter = 0
             
-            self.timer.start(int(1000 / self.source_fps))
+            # Use a fast timer; we self-regulate with playback_clock in _playback_tick.
+            self.timer.start(1)
             self.status_label.setText(f"▶ Real-time @ {self.source_fps:.1f} FPS")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", str(e))
@@ -263,14 +273,29 @@ class PoseAnalysisGUI(QtWidgets.QWidget):
         self.cap = cv2.VideoCapture(self.video_path)
         self.source_fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
         self.current_frame_idx = 0
+
+        self.playback_clock.restart()
+        self._graph_frame_counter = 0
         
-        self.timer.start(int(1000 / self.source_fps))
+        # Use a fast timer; we self-regulate with playback_clock in _playback_tick.
+        self.timer.start(1)
         self.status_label.setText(f"▶ Playback @ {self.source_fps:.1f} FPS")
     
     def _playback_tick(self):
         """Process one frame."""
         if not self.cap or not self.cap.isOpened():
             return
+
+        # Keep playback time-aligned to the video's FPS by skipping frames if we're behind.
+        frame_period_ms = 1000.0 / max(self.source_fps, 1e-6)
+        target_idx = int(self.playback_clock.elapsed() / frame_period_ms)
+        if target_idx > self.current_frame_idx:
+            # Skip frames without decoding to catch up (cheap).
+            to_skip = min(target_idx - self.current_frame_idx, 200)  # safety cap
+            for _ in range(to_skip):
+                if not self.cap.grab():
+                    break
+                self.current_frame_idx += 1
         
         ret, frame = self.cap.read()
         if not ret:
@@ -335,7 +360,7 @@ class PoseAnalysisGUI(QtWidgets.QWidget):
                     leg_pts[name] = np.array([float(x), float(y)])
             
             hip_dist = float(row.get("hip_dist_px") or 0)
-            motion = float(row.get("motion_px", 0))
+            motion = float(row.get("motion_px") or 0)
             
             angles = {}
             angle_keys = FRONTAL_ANGLES if self.view_mode == "frontal" else SAGITTAL_ANGLES
@@ -401,6 +426,14 @@ class PoseAnalysisGUI(QtWidgets.QWidget):
     
     def _update_graphs(self, angles: Dict[str, float]):
         """Update angle graphs."""
+        # Throttle graph redraws for smooth video playback.
+        from config import ProcessingConfig
+
+        self._graph_frame_counter += 1
+        every_n = max(1, int(getattr(ProcessingConfig, "GRAPH_UPDATE_EVERY_N_FRAMES", 1)))
+        if self._graph_frame_counter % every_n != 0:
+            return
+
         if self.view_mode == "frontal":
             self.hip_canvas.update_frontal(
                 angles.get("LEFT_HIP_adduction", 0),
@@ -431,7 +464,7 @@ class PoseAnalysisGUI(QtWidgets.QWidget):
         img = QtGui.QImage(rgb.data, w, h, ch * w, QtGui.QImage.Format_RGB888)
         pix = QtGui.QPixmap.fromImage(img)
         pix = pix.scaled(self.video_label.size(), QtCore.Qt.KeepAspectRatio, 
-                        QtCore.Qt.SmoothTransformation)
+                        QtCore.Qt.FastTransformation)
         self.video_label.setPixmap(pix)
         self.current_frame_data = frame
     
