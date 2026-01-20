@@ -1,3 +1,7 @@
+from typing import Dict, Optional
+import numpy as np
+
+
 class AngleStabilizer:
     """Smooth angles based on motion speed and hip stability."""
     

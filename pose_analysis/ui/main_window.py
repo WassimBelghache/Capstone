@@ -12,9 +12,6 @@ from core.pose_detector import PoseDetector
 from core.biomechanics import (
     compute_joint_angles, 
     get_body_frame, 
-    LANDMARK_IDX, 
-    LEG_LANDMARKS, 
-    SHOULDER_LANDMARKS
 )
 from core.video_utils import fix_rotation, to_pixel_coords
 from ui.plot_widgets import HipAngleCanvas, KneeAngleCanvas, AnkleAngleCanvas
@@ -23,7 +20,9 @@ from config import (
     FRONTAL_ANGLES, 
     SAGITTAL_ANGLES, 
     BONE_CONNECTIONS,
-    ProcessingConfig
+    LANDMARK_IDX, 
+    LEG_LANDMARKS, 
+    SHOULDER_LANDMARKS,
 )
 
 
@@ -99,11 +98,11 @@ class PoseAnalysisGUI(QtWidgets.QWidget):
         
         # File selection
         file_row = QtWidgets.QHBoxLayout()
-        self.video_btn = QtWidgets.QPushButton("📁 Video")
+        self.video_btn = QtWidgets.QPushButton("Video")
         self.video_btn.clicked.connect(self._select_video)
         file_row.addWidget(self.video_btn)
         
-        self.model_btn = QtWidgets.QPushButton("🤖 Model")
+        self.model_btn = QtWidgets.QPushButton("Model")
         self.model_btn.clicked.connect(self._select_model)
         file_row.addWidget(self.model_btn)
         layout.addLayout(file_row)
@@ -126,7 +125,7 @@ class PoseAnalysisGUI(QtWidgets.QWidget):
         
         # Actions
         action_row = QtWidgets.QHBoxLayout()
-        self.analyze_btn = QtWidgets.QPushButton("⚡ Analyze")
+        self.analyze_btn = QtWidgets.QPushButton("Analyze")
         self.analyze_btn.clicked.connect(self._start_analysis)
         action_row.addWidget(self.analyze_btn)
         
@@ -335,7 +334,7 @@ class PoseAnalysisGUI(QtWidgets.QWidget):
                 if x and y:
                     leg_pts[name] = np.array([float(x), float(y)])
             
-            hip_dist = float(row.get("hip_dist_px", 0))
+            hip_dist = float(row.get("hip_dist_px") or 0)
             motion = float(row.get("motion_px", 0))
             
             angles = {}

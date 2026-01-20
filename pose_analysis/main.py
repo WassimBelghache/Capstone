@@ -1,6 +1,6 @@
 import sys
 from PyQt5 import QtWidgets
-from pose_analysis_gui import PoseAnalysisGUI  # adjust import if needed
+from ui.main_window import PoseAnalysisGUI
 
 
 def main():

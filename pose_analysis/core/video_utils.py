@@ -1,3 +1,8 @@
+from __future__ import annotations
+import cv2
+import numpy as np
+
+
 def fix_rotation(frame: np.ndarray, cap: cv2.VideoCapture) -> np.ndarray:
     """
     Fix video rotation based on metadata.

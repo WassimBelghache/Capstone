@@ -2,6 +2,8 @@ import csv
 from pathlib import Path
 from typing import Dict, Optional
 from PyQt5 import QtCore
+import cv2
+import numpy as np
 
 
 class AnalysisWorker(QtCore.QThread):
