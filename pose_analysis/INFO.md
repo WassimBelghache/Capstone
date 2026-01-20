@@ -13,12 +13,12 @@ python main.py
 Then
 ```bash
 Select Video
-Click the 📁 Video button
+Click the Video button
 
 Choose your motion capture video
 
 Select Model
-Click the 🤖 Model button
+Click the Model button
 
 Choose your .task model file
 
@@ -35,7 +35,7 @@ Fast Playback (CSV): Requires analysis first, plays at full speed
 
 # Workflow Option 1: Fast Playback
 ```bash
-Click ⚡ Analyze (Pass 1)
+Click Analyze (Pass 1)
 
 Processes entire video once
 
