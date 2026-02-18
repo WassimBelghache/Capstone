@@ -11,6 +11,8 @@ from drone_mocap.pose.mediapose import MediaPipePoseEstimator
 from drone_mocap.filters.smoothing import savgol_smooth_xy
 from drone_mocap.angles.saggital2D import joint_angles_sagittal
 from drone_mocap.io.mocap_txt import read_mocap_angles_txt
+from drone_mocap.evaluation.compare_mocap import compare_video_to_mocap, save_compare_outputs
+
 
 def run_pipeline(
     video: Path,
@@ -88,10 +90,18 @@ def run_pipeline(
     df_angles.to_csv(out_dir / "derived" / "angles_sagittal.csv", index=False)
     df_angles.to_parquet(out_dir / "derived" / "angles_sagittal.parquet", index=False)
 
-    # Optional MoCap load (no alignment yet in MVP)
+    # Optional MoCap load 
+    mocap_loaded = None
     if mocap_txt:
         df_mocap = read_mocap_angles_txt(mocap_txt)
         df_mocap.to_parquet(out_dir / "raw" / "mocap_angles.parquet", index=False)
+        mocap_loaded = df_mocap
+
+    #  generate comparison outputs
+    if mocap_loaded is not None:
+        res = compare_video_to_mocap(df_angles, mocap_loaded, visible_side=visible_side)
+        save_compare_outputs(res, out_dir / "reports")
+
 
     summary = {
         "frames_processed": int(T),

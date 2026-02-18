@@ -30,23 +30,34 @@ def joint_angles_sagittal(xy: np.ndarray, vis: np.ndarray, visible_side: str = "
     knee = LM[f"{side}_KNEE"]
     ankle = LM[f"{side}_ANKLE"]
     foot = LM[f"{side}_FOOT"]
+    heel = LM[f"{side}_HEEL"]
 
-    needed = [shoulder, hip, knee, ankle, foot]
+    needed = [shoulder, hip, knee, ankle, heel, foot]
     if any(vis[i] < min_vis or not np.all(np.isfinite(xy[i])) for i in needed):
         return {"hip": np.nan, "knee": np.nan, "ankle": np.nan}
 
     v_trunk = xy[shoulder] - xy[hip]      # hip -> shoulder (up)
     v_thigh = xy[knee] - xy[hip]          # hip -> knee
     v_shank = xy[ankle] - xy[knee]        # knee -> ankle
-    v_foot  = xy[foot] - xy[ankle]        # ankle -> foot
+    
+    # Foot segment: heel -> toe (more stable)
+    v_foot = xy[foot] - xy[heel]
+
+    # Shank at ankle: ankle -> knee
+    v_shank_at_ankle = xy[knee] - xy[ankle]
 
     # Knee: angle between thigh (knee->hip) and shank (knee->ankle)
     knee_angle = _angle_between(xy[hip] - xy[knee], xy[ankle] - xy[knee])
 
     # Hip: angle between trunk (hip->shoulder) and thigh (hip->knee)
     hip_angle = _angle_between(v_trunk, v_thigh)
+    
+    ankle_angle = _angle_between(v_shank_at_ankle, v_foot)
+    
+    knee_flex = 180.0 - knee_angle
 
-    # Ankle: angle between shank (ankle->knee) and foot (ankle->foot)
-    ankle_angle = _angle_between(xy[knee] - xy[ankle], xy[foot] - xy[ankle])
+    hip_flex = 180.0 - hip_angle
+    
+    ankle_dorsi = 90.0 - ankle_angle
 
-    return {"hip": hip_angle, "knee": knee_angle, "ankle": ankle_angle}
+    return {"hip": hip_flex, "knee": knee_flex, "ankle": ankle_dorsi}
