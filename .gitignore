@@ -1,12 +1,7 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-.DS_Store
-
-# Virtual environments
+__pycache__
+drone_mocap/src/drone_mocap.egg-info
 .venv
+.DS_Store
+*.pyc
+.venv311
+runs
