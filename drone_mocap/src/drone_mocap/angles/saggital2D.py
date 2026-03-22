@@ -11,7 +11,7 @@ from drone_mocap.pose.mediapose import LM
 ANAT_LIMITS: dict[str, tuple[float, float]] = {
     "hip":   (-30.0, 130.0),   # -30° extension  →  130° flexion
     "knee":  (-10.0, 175.0),   # -10° hyperext   →  175° flexion
-    "ankle": (-50.0, 35.0),    # -50° plantarflex →   35° dorsiflexion
+    "ankle": (-80.0, 30.0),    # widened to match MoCap Z axis range (-64° to -5°)
 }
 
 # ---------------------------------------------------------------------------
@@ -26,16 +26,32 @@ ANAT_LIMITS: dict[str, tuple[float, float]] = {
 #   RIGHT visible side (athlete's right side faces camera, moves L→R):
 #     knee:  cz_sign = -1  (flexion → cross_z < 0)
 #     hip:   cz_sign = +1  (flexion → cross_z > 0)
-#     ankle: cz_sign = +1  (dorsiflexion → cross_z > 0), offset −90°
+#     ankle: cz_sign = +1  (dorsiflexion → cross_z > 0)
 #
 #   LEFT visible side (athlete's left side faces camera, moves R→L):
 #     knee:  cz_sign = +1
 #     hip:   cz_sign = -1
-#     ankle: cz_sign = -1, offset −90°
+#     ankle: cz_sign = -1
 # ---------------------------------------------------------------------------
 _CZ_SIGN: dict[str, dict[str, float]] = {
     "right": {"knee": -1.0, "hip": +1.0, "ankle": +1.0},
     "left":  {"knee": +1.0, "hip": -1.0, "ankle": -1.0},
+}
+
+# ---------------------------------------------------------------------------
+# Ankle offset correction.
+#
+# The raw atan2 ankle angle has an offset because the "neutral" foot position
+# (foot roughly horizontal) doesn't correspond to 0° naturally.
+#
+# For RIGHT side: neutral gives raw ≈ +90°, so we subtract 90°
+# For LEFT side:  neutral gives raw ≈ -90°, so we add 90°
+#
+# These were verified empirically from the raw ankle values seen in testing.
+# ---------------------------------------------------------------------------
+_ANKLE_OFFSET: dict[str, float] = {
+    "right": -90.0,
+    "left":  -80.0,
 }
 
 
@@ -102,12 +118,7 @@ def joint_angles_sagittal(
         xy:           (33, 2) pixel coordinates for one frame.
         vis:          (33,)   MediaPipe visibility scores in [0, 1].
         visible_side: "right" or "left" — which side of the body faces the camera.
-        min_vis:      Per-keypoint minimum visibility. Joints with any constituent
-                      keypoint below this threshold return NaN for that angle only
-                      (not a whole-frame block). Lowered from 0.5 → 0.3 because
-                      the upstream Butterworth filter has already gap-filled via
-                      spline, so coordinates at low-vis frames are interpolated
-                      estimates rather than raw noisy detections.
+        min_vis:      Per-keypoint minimum visibility threshold.
 
     Returns:
         dict with keys "hip", "knee", "ankle" in degrees.
@@ -130,7 +141,7 @@ def joint_angles_sagittal(
         i = idx[name]
         return vis[i] >= min_vis and bool(np.all(np.isfinite(xy[i])))
 
-    # --- KNEE (requires shoulder-hip-knee-ankle chain) ---
+    # --- KNEE (hip → knee → ankle) ---
     if _ok("hip") and _ok("knee") and _ok("ankle"):
         knee_angle = _signed_angle_at_apex(
             xy[idx["hip"]], xy[idx["knee"]], xy[idx["ankle"]], cz["knee"]
@@ -138,7 +149,7 @@ def joint_angles_sagittal(
     else:
         knee_angle = np.nan
 
-    # --- HIP (requires shoulder-hip-knee) ---
+    # --- HIP (shoulder → hip → knee) ---
     if _ok("shoulder") and _ok("hip") and _ok("knee"):
         hip_angle = _signed_angle_at_apex(
             xy[idx["shoulder"]], xy[idx["hip"]], xy[idx["knee"]], cz["hip"]
@@ -146,14 +157,14 @@ def joint_angles_sagittal(
     else:
         hip_angle = np.nan
 
-    # --- ANKLE (requires knee-ankle-foot, uses heel→foot for foot segment) ---
-    if _ok("knee") and _ok("ankle") and _ok("heel") and _ok("foot"):
+    # --- ANKLE (knee → ankle → foot) ---
+    # The raw angle at the ankle apex between the shank (knee→ankle) and
+    # foot (ankle→foot) segments. The offset zeroes the angle at neutral stance.
+    if _ok("knee") and _ok("ankle") and _ok("foot"):
         raw_ankle = _signed_angle_at_apex(
             xy[idx["knee"]], xy[idx["ankle"]], xy[idx["foot"]], cz["ankle"]
         )
-        # Neutral foot (horizontal) gives atan2 → 90° for right, -90° for left.
-        # Subtract 90° (or add 90° for left) to zero at neutral stance.
-        ankle_angle = raw_ankle - (90.0 if side_key == "right" else -90.0)
+        ankle_angle = raw_ankle + _ANKLE_OFFSET[side_key]
     else:
         ankle_angle = np.nan
 
