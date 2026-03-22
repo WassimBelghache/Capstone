@@ -51,7 +51,7 @@ _CZ_SIGN: dict[str, dict[str, float]] = {
 # ---------------------------------------------------------------------------
 _ANKLE_OFFSET: dict[str, float] = {
     "right": -90.0,
-    "left":  -97.0,   # -80 - 17 to match MoCap Z axis mean offset
+    "left":  -114.0,  # empirically derived: -97 - 17.15 to match MoCap Z axis mean
 }
 
 
