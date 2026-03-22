@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
 from scipy.interpolate import CubicSpline
+from scipy.ndimage import median_filter
 
 
 def butterworth_smooth_xy(
@@ -43,34 +44,28 @@ def butterworth_smooth_xy(
     out = xy_series.copy()
 
     nyq = fps / 2.0
-    # Guard: cutoff must be strictly below Nyquist
     cutoff_norm = float(np.clip(cutoff_hz / nyq, 1e-4, 0.99))
     sos = butter(order, cutoff_norm, btype="low", output="sos")
 
     t_idx = np.arange(T, dtype=float)
 
-    # sosfiltfilt requires at least 3*(order+1) samples for padding
     min_samples_for_filter = 3 * (order + 1)
 
     for j in range(J):
-        # High-confidence mask: vis >= min_vis AND both x,y are finite
         conf_mask = (vis_series[:, j] >= min_vis) & np.all(
             np.isfinite(xy_series[:, j, :]), axis=1
         )
         n_good = int(conf_mask.sum())
 
-        # Need at least 4 anchor points for a cubic spline (k=3 requires k+1)
         if n_good < 4:
             continue
 
-        # Track frames that are truly absent (no detection at all, regardless of vis)
         totally_absent = ~np.any(np.isfinite(xy_series[:, j, :]), axis=1)
 
         for c in range(C):
             y_raw = xy_series[:, j, c]
 
             if n_good < T:
-                # --- Confidence-weighted cubic spline gap-filling ---
                 t_good = t_idx[conf_mask]
                 y_good = y_raw[conf_mask]
                 cs = CubicSpline(t_good, y_good, extrapolate=True)
@@ -79,16 +74,73 @@ def butterworth_smooth_xy(
                 y_interp = y_raw.copy()
 
             if T < min_samples_for_filter:
-                # Too short to filter safely — keep interpolated values
                 out[:, j, c] = y_interp
                 out[totally_absent, j, c] = np.nan
                 continue
 
-            # --- Zero-phase dual-pass Butterworth ---
             y_smooth = sosfiltfilt(sos, y_interp)
 
             out[:, j, c] = y_smooth
-            # Restore NaN at frames where the joint was never detected at all
             out[totally_absent, j, c] = np.nan
+
+    return out
+
+
+def median_smooth_angles(
+    angles_dict: dict[str, np.ndarray],
+    kernel_sizes: dict[str, int] | None = None,
+) -> dict[str, np.ndarray]:
+    """
+    Apply joint-specific median filtering to angle time-series.
+
+    Median filtering is particularly effective for removing impulse noise
+    (sudden spikes) from keypoint jitter without distorting the underlying
+    waveform shape. It is applied AFTER Butterworth filtering and anatomical
+    clamping.
+
+    The ankle benefits most from this because the foot/heel keypoints are
+    small and fast-moving, causing occasional large spike errors that the
+    Butterworth filter alone cannot remove.
+
+    Args:
+        angles_dict:  {"hip": (T,), "knee": (T,), "ankle": (T,)} arrays.
+        kernel_sizes: Per-joint median filter kernel size (must be odd).
+                      Defaults:
+                        hip:   3  (light smoothing, already clean)
+                        knee:  3  (light smoothing, already clean)
+                        ankle: 13 (stronger smoothing, empirically derived
+                                   to maximise correlation with MoCap Z axis)
+
+    Returns:
+        Same structure with median filtering applied.
+    """
+    if kernel_sizes is None:
+        kernel_sizes = {
+            "hip":   3,
+            "knee":  3,
+            "ankle": 13,
+        }
+
+    out: dict[str, np.ndarray] = {}
+    for joint, arr in angles_dict.items():
+        kernel = kernel_sizes.get(joint, 1)
+        if kernel > 1:
+            # Replace NaNs temporarily for median filter then restore
+            finite_mask = np.isfinite(arr)
+            if finite_mask.sum() < kernel:
+                out[joint] = arr.copy()
+                continue
+            arr_filled = arr.copy()
+            # Fill NaNs with nearest valid value before filtering
+            if not finite_mask.all():
+                idx = np.arange(len(arr))
+                valid_idx = idx[finite_mask]
+                arr_filled = np.interp(idx, valid_idx, arr[finite_mask])
+            smoothed = median_filter(arr_filled, size=kernel)
+            # Restore NaNs
+            smoothed[~finite_mask] = np.nan
+            out[joint] = smoothed
+        else:
+            out[joint] = arr.copy()
 
     return out

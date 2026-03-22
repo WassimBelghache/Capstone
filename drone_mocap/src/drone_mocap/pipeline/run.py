@@ -9,7 +9,7 @@ import cv2
 
 from drone_mocap.io.video import get_video_meta, iter_frames
 from drone_mocap.pose.mediapose import MediaPipePoseEstimator, LM
-from drone_mocap.filters.smoothing import butterworth_smooth_xy
+from drone_mocap.filters.smoothing import butterworth_smooth_xy, median_smooth_angles
 from drone_mocap.angles.saggital2D import joint_angles_sagittal, clamp_angle_series
 from drone_mocap.io.mocap_txt import read_mocap_angles_txt
 from drone_mocap.evaluation.compare_mocap import compare_video_to_mocap, save_compare_outputs
@@ -104,14 +104,7 @@ def _write_diagnostic_video(
     visible_side: str,
     max_frames: int = 0,
 ) -> None:
-    """
-    Second pass through the source video: annotate each frame and write MP4.
-
-    Color convention:
-      Green  (vis > 0.8)  — high-confidence direct detection
-      Yellow (0.3–0.8)    — moderate / interpolated zone
-      Red    (< 0.3)      — low confidence, position from spline estimate
-    """
+    """Second pass through the source video: annotate each frame and write MP4."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video for diagnostic pass: {video_path}")
@@ -155,7 +148,7 @@ def run_pipeline(
     diagnostic_video: bool = True,
 ) -> Path:
     """
-    Full sagittal markerless MoCap pipeline (v1.2.0).
+    Full sagittal markerless MoCap pipeline (v1.3.0).
 
     Args:
         video:             Path to input video.
@@ -164,9 +157,6 @@ def run_pipeline(
         visible_side:      "right" or "left" — which side faces the camera.
         max_frames:        0 = all frames; >0 limits for quick tests.
         cutoff_hz:         Butterworth low-pass cutoff in Hz.
-                             6 Hz  — walking / slow movement
-                             10 Hz — jogging
-                             12 Hz — sprinting
         filter_order:      Butterworth order (default 4).
         min_vis:           Keypoint visibility anchor threshold (default 0.3).
         athlete_height_m:  Enables pixel→metre scaling from the athlete's height.
@@ -240,23 +230,36 @@ def run_pipeline(
 
     df_angles = pd.DataFrame(rows)
 
-    # Anatomical clamp on full time-series (replaces isolated outliers via
-    # rolling interpolation rather than hard clipping)
+    # ------------------------------------------------------------------
+    # Anatomical clamping — replaces isolated outliers via rolling mean
+    # ------------------------------------------------------------------
     angle_arrays = {
         "hip":   df_angles[f"{visible_side}_hip_deg"].to_numpy(float),
         "knee":  df_angles[f"{visible_side}_knee_deg"].to_numpy(float),
         "ankle": df_angles[f"{visible_side}_ankle_deg"].to_numpy(float),
     }
     clamped = clamp_angle_series(angle_arrays)
-    df_angles[f"{visible_side}_hip_deg"]   = clamped["hip"]
-    df_angles[f"{visible_side}_knee_deg"]  = clamped["knee"]
-    df_angles[f"{visible_side}_ankle_deg"] = clamped["ankle"]
 
-    # Sync clamped values back into per-frame dicts for the overlay
+    # ------------------------------------------------------------------
+    # Median smoothing — removes impulse noise / keypoint jitter
+    # Applied after clamping so spikes are already reduced before median
+    # Ankle uses kernel=13 (empirically optimal for sagittal jogging data)
+    # ------------------------------------------------------------------
+    smoothed = median_smooth_angles(clamped, kernel_sizes={
+        "hip":   3,
+        "knee":  3,
+        "ankle": 13,
+    })
+
+    df_angles[f"{visible_side}_hip_deg"]   = smoothed["hip"]
+    df_angles[f"{visible_side}_knee_deg"]  = smoothed["knee"]
+    df_angles[f"{visible_side}_ankle_deg"] = smoothed["ankle"]
+
+    # Sync smoothed values back into per-frame dicts for the overlay
     for t in range(T):
-        angles_per_frame[t]["hip"]   = float(clamped["hip"][t])
-        angles_per_frame[t]["knee"]  = float(clamped["knee"][t])
-        angles_per_frame[t]["ankle"] = float(clamped["ankle"][t])
+        angles_per_frame[t]["hip"]   = float(smoothed["hip"][t])
+        angles_per_frame[t]["knee"]  = float(smoothed["knee"][t])
+        angles_per_frame[t]["ankle"] = float(smoothed["ankle"][t])
 
     # ------------------------------------------------------------------
     # Optional: pixel → metre scaling + joint velocities
@@ -332,16 +335,17 @@ def run_pipeline(
     # Summary
     # ------------------------------------------------------------------
     summary = {
-        "version": "1.2.0",
+        "version": "1.3.0",
         "frames_processed": int(T),
         "filter": {
-            "type": "butterworth_zerophase",
-            "cutoff_hz": cutoff_hz,
-            "order": filter_order,
+            "type":           "butterworth_zerophase + median",
+            "cutoff_hz":      cutoff_hz,
+            "order":          filter_order,
             "min_vis_anchor": min_vis,
+            "median_kernels": {"hip": 3, "knee": 3, "ankle": 13},
         },
         "scaling": {
-            "px_per_meter": scaler.px_per_meter if scaler else None,
+            "px_per_meter":   scaler.px_per_meter if scaler else None,
             "athlete_height_m": athlete_height_m,
         },
         "outputs": {
