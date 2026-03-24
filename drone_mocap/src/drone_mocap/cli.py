@@ -135,7 +135,7 @@ def evaluate(
     # --- Load MoCap reference ---
     print(f"[cyan]Loading MoCap reference:[/cyan] {mocap}")
     df_mocap = read_mocap_angles_txt(mocap)
-    print(f"  → {len(df_mocap)} rows, columns: {list(df_mocap.columns)}")
+    print(f"  -> {len(df_mocap)} rows, columns: {list(df_mocap.columns)}")
 
     # --- Run comparison ---
     print("[cyan]Running comparison…[/cyan]")
