@@ -1,23 +1,28 @@
-[project]
+[tool.poetry]
 name = "drone-mocap"
-version = "1.1.0"
-description = "Sagittal markerless mocap baseline"
-requires-python = ">=3.10"
-dependencies = [
-    "mediapipe==0.10.14",
-    "opencv-python",
-    "numpy",
-    "pandas",
-    "scipy",
-    "pydantic",
-    "typer",
-    "rich",
-    "pyarrow",
-    ]
+version = "1.2.0"
+description = "Sagittal markerless motion capture — 2D kinematic extraction from video"
+authors = ["DroCap Capstone Team"]
+readme = "README.md"
+packages = [{include = "drone_mocap", from = "src"}]
 
-[project.scripts]
+[tool.poetry.dependencies]
+python       = "~3.11"
+mediapipe    = "0.10.14"
+jax          = "0.4.20"
+jaxlib       = "0.4.20"
+opencv-python = "*"
+numpy        = "^1.26.0"
+pandas       = "*"
+scipy        = "*"
+pyarrow      = "*"
+matplotlib   = "*"
+typer        = {extras = ["all"], version = "*"}
+rich         = "*"
+
+[tool.poetry.scripts]
 drone-mocap = "drone_mocap.cli:app"
 
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires      = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
