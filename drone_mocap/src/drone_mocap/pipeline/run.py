@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from datetime import datetime
+from typing import Callable
 import json
 import numpy as np
 import pandas as pd
@@ -146,6 +147,7 @@ def run_pipeline(
     min_vis: float = 0.3,
     athlete_height_m: float | None = None,
     diagnostic_video: bool = True,
+    on_progress: Callable[[int, int, "np.ndarray", "np.ndarray", "np.ndarray"], None] | None = None,
 ) -> Path:
     """
     Full sagittal markerless MoCap pipeline (v1.3.0).
@@ -183,12 +185,15 @@ def run_pipeline(
     # ------------------------------------------------------------------
     estimator = MediaPipePoseEstimator()
     xy_list, vis_list, frame_idx = [], [], []
+    total_frames = meta.frame_count if not max_frames else min(max_frames, meta.frame_count)
 
     for i, frame in iter_frames(video, max_frames=max_frames):
         pr = estimator.predict(frame)
         xy_list.append(pr.xy)
         vis_list.append(pr.vis)
         frame_idx.append(i)
+        if on_progress is not None:
+            on_progress(i, total_frames, frame, pr.xy, pr.vis)
 
     estimator.close()
 

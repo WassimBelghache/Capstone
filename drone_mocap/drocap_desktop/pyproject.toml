@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "drocap-desktop"
+version = "0.1.0"
+description = "DroCap Mission Control — PyQt6 desktop HUD"
+authors = ["DroCap Capstone Team"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "~3.11"
+PyQt6 = "*"
+pyqtgraph = "*"
+scipy = "*"
+numpy = "^1.26.0"
+drone-mocap = {path = "../", develop = true}
+
+[tool.poetry.scripts]
+drocap-desktop = "main:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
