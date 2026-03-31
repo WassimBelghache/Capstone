@@ -6,124 +6,153 @@ Responsibilities:
   • Pipeline parameter inputs (side, cutoff Hz, order, min_vis, height)
   • Output directory selection
   • RUN / ABORT button + progress bar
-  • Live skeleton preview overlay (painted on top of a still frame grab)
+  • Live skeleton overlay: QPainter draws 33 MediaPipe landmarks over a
+    dimmed BGR frame — proving the AI sees the athlete in real-time.
   • Emits run_requested(dict) and abort_requested()
 """
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import numpy as np
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QPainter, QPen, QColor, QPixmap
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QBrush
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QGroupBox, QLabel, QLineEdit, QPushButton,
-    QFileDialog, QDoubleSpinBox, QSpinBox, QComboBox,
-    QProgressBar, QSizePolicy,
+    QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QProgressBar, QPushButton, QSizePolicy,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
-
-# MediaPipe skeleton links (same as run.py)
+# ── MediaPipe 33-keypoint skeleton connectivity ───────────────────────────
 _SKELETON_LINKS = [
-    (11,12),(11,23),(12,24),(23,24),
-    (23,25),(24,26),(25,27),(26,28),
-    (27,29),(28,30),(29,31),(30,32),
-    (11,13),(12,14),(13,15),(14,16),
+    (11,12),(11,23),(12,24),(23,24),          # torso
+    (23,25),(24,26),(25,27),(26,28),          # legs
+    (27,29),(28,30),(29,31),(30,32),          # feet
+    (11,13),(12,14),(13,15),(14,16),          # arms
+    (0,1),(1,2),(2,3),(3,7),                  # face left
+    (0,4),(4,5),(5,6),(6,8),                  # face right
+    (9,10),                                   # mouth
 ]
 
+# Jira-blue for limbs; white for joints
+_LIMB_COLOR  = QColor("#0052CC")
+_JOINT_COLOR = QColor("#FFFFFF")
+_JOINT_LOW   = QColor("#FF5630")   # red when vis < 0.3
 
-class SkeletonPreview(QLabel):
-    """Small canvas that draws a stick figure from keypoint arrays."""
+
+class SkeletonPreview(QWidget):
+    """
+    Renders a live skeleton overlaid on the most-recent BGR video frame.
+
+    The frame is dimmed to 55% brightness so the skeleton stands out.
+    Limbs are drawn in Jira-blue; joints are white (red when low-confidence).
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(200, 120)
+        self.setMinimumSize(220, 150)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._xy:  np.ndarray | None = None
-        self._vis: np.ndarray | None = None
-        self._set_blank()
+        self._frame_bgr: np.ndarray | None = None
+        self._xy:        np.ndarray | None = None
+        self._vis:       np.ndarray | None = None
 
-    def _set_blank(self) -> None:
-        px = QPixmap(self.width() or 200, self.height() or 120)
-        px.fill(QColor("#0d0d18"))
-        self.setPixmap(px)
+    def update_frame(
+        self,
+        frame_bgr: np.ndarray,
+        xy: np.ndarray,
+        vis: np.ndarray,
+    ) -> None:
+        self._frame_bgr = frame_bgr
+        self._xy        = xy
+        self._vis       = vis
+        self.update()   # triggers paintEvent
 
-    def update_skeleton(self, xy: np.ndarray, vis: np.ndarray) -> None:
-        self._xy  = xy
-        self._vis = vis
-        self._redraw()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        if self._xy is None:
-            self._set_blank()
-        else:
-            self._redraw()
-
-    def _redraw(self) -> None:
-        if self._xy is None:
-            return
-        xy  = self._xy
-        vis = self._vis
-        w, h = max(self.width(), 1), max(self.height(), 1)
-
-        # Normalize keypoint positions to canvas
-        valid = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
-        if valid.sum() < 2:
-            self._set_blank()
-            return
-
-        x_vals = xy[valid, 0]
-        y_vals = xy[valid, 1]
-        x_min, x_max = x_vals.min(), x_vals.max()
-        y_min, y_max = y_vals.min(), y_vals.max()
-        span_x = max(x_max - x_min, 1.0)
-        span_y = max(y_max - y_min, 1.0)
-        margin = 16
-
-        def to_canvas(pt):
-            nx = (pt[0] - x_min) / span_x * (w - 2 * margin) + margin
-            ny = (pt[1] - y_min) / span_y * (h - 2 * margin) + margin
-            return int(nx), int(ny)
-
-        img = QImage(w, h, QImage.Format.Format_RGB32)
-        img.fill(QColor("#0d0d18"))
-        painter = QPainter(img)
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
 
-        def kp_color(v: float) -> QColor:
-            if v >= 0.8:
-                return QColor("#30d158")
-            if v >= 0.3:
-                return QColor("#ffd60a")
-            return QColor("#ff453a")
+        # ── Background ──────────────────────────────────────────────────────
+        if self._frame_bgr is not None:
+            frame = self._frame_bgr
+            fh, fw = frame.shape[:2]
+            # Convert BGR → RGB
+            rgb = frame[:, :, ::-1].copy()
+            # Dim to 55% brightness
+            rgb = (rgb.astype(np.float32) * 0.55).clip(0, 255).astype(np.uint8)
+            # Ensure contiguous memory for QImage
+            rgb = np.ascontiguousarray(rgb)
+            qimg = QImage(rgb.data, fw, fh, fw * 3, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg).scaled(
+                w, h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            # Centre the frame
+            x_off = (w - pixmap.width())  // 2
+            y_off = (h - pixmap.height()) // 2
+            painter.drawPixmap(x_off, y_off, pixmap)
 
+            # ── Scale keypoints to the displayed region ──────────────────────
+            scale  = min(w / fw, h / fh)
+            ox     = (w - fw * scale) / 2
+            oy     = (h - fh * scale) / 2
+
+            def to_canvas(pt: np.ndarray) -> tuple[int, int]:
+                return int(pt[0] * scale + ox), int(pt[1] * scale + oy)
+
+        else:
+            # Blank slate before first frame arrives
+            painter.fillRect(0, 0, w, h, QColor("#EBECF0"))
+            painter.setPen(QColor("#A5ADBA"))
+            painter.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                "Waiting for analysis…",
+            )
+            return
+
+        if self._xy is None or self._vis is None:
+            return
+
+        xy, vis = self._xy, self._vis
+
+        # ── Limbs ────────────────────────────────────────────────────────────
+        limb_pen = QPen(_LIMB_COLOR, 2, Qt.PenStyle.SolidLine)
+        limb_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(limb_pen)
         for i, j in _SKELETON_LINKS:
             pi, pj = xy[i], xy[j]
             if not (np.all(np.isfinite(pi)) and np.all(np.isfinite(pj))):
                 continue
             avg_vis = float((vis[i] + vis[j]) / 2)
-            pen = QPen(kp_color(avg_vis), 1, Qt.PenStyle.SolidLine)
-            painter.setPen(pen)
+            if avg_vis < 0.1:
+                continue
             painter.drawLine(*to_canvas(pi), *to_canvas(pj))
 
+        # ── Joints ───────────────────────────────────────────────────────────
+        painter.setPen(Qt.PenStyle.NoPen)
         for idx in range(33):
             pt = xy[idx]
             if not np.all(np.isfinite(pt)):
                 continue
+            v = float(vis[idx])
+            if v < 0.1:
+                continue
             cx, cy = to_canvas(pt)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(kp_color(float(vis[idx])))
+            color = _JOINT_COLOR if v >= 0.3 else _JOINT_LOW
+            # Outer white/red ring
+            painter.setBrush(QBrush(color))
+            r = 4
+            painter.drawEllipse(cx - r, cy - r, r * 2, r * 2)
+            # Inner dark dot for depth cue
+            painter.setBrush(QBrush(QColor("#172B4D")))
             painter.drawEllipse(cx - 2, cy - 2, 4, 4)
 
-        painter.end()
-        self.setPixmap(QPixmap.fromImage(img))
 
+# ── ControlPanel ──────────────────────────────────────────────────────────
 
 class ControlPanel(QWidget):
+    from PyQt6.QtCore import pyqtSignal
     run_requested   = pyqtSignal(dict)
     abort_requested = pyqtSignal()
 
@@ -131,51 +160,51 @@ class ControlPanel(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
 
         layout.addWidget(self._build_files_group())
         layout.addWidget(self._build_params_group())
         layout.addWidget(self._build_run_group())
-        layout.addWidget(self._build_preview_group())
-        layout.addStretch()
+        layout.addWidget(self._build_preview_group(), stretch=1)
 
     # ── File selection ────────────────────────────────────────────────────────
 
     def _build_files_group(self) -> QGroupBox:
-        grp = QGroupBox("INPUT FILES")
+        grp = QGroupBox("Input Files")
         g = QGridLayout(grp)
-        g.setSpacing(4)
+        g.setSpacing(6)
+        g.setColumnStretch(1, 1)
 
         self._video_edit = QLineEdit()
-        self._video_edit.setPlaceholderText("Select video…")
+        self._video_edit.setPlaceholderText("Select video file…")
         self._video_edit.setReadOnly(True)
-        video_btn = QPushButton("…")
-        video_btn.setFixedWidth(28)
+        video_btn = QPushButton("Browse")
+        video_btn.setFixedWidth(60)
         video_btn.clicked.connect(self._pick_video)
 
         self._mocap_edit = QLineEdit()
         self._mocap_edit.setPlaceholderText("MoCap reference (optional)")
         self._mocap_edit.setReadOnly(True)
-        mocap_btn = QPushButton("…")
-        mocap_btn.setFixedWidth(28)
+        mocap_btn = QPushButton("Browse")
+        mocap_btn.setFixedWidth(60)
         mocap_btn.clicked.connect(self._pick_mocap)
 
         self._out_edit = QLineEdit()
         self._out_edit.setPlaceholderText("Output directory…")
         self._out_edit.setReadOnly(True)
-        out_btn = QPushButton("…")
-        out_btn.setFixedWidth(28)
+        out_btn = QPushButton("Browse")
+        out_btn.setFixedWidth(60)
         out_btn.clicked.connect(self._pick_outdir)
 
-        g.addWidget(QLabel("Video"), 0, 0)
-        g.addWidget(self._video_edit, 0, 1)
-        g.addWidget(video_btn, 0, 2)
-        g.addWidget(QLabel("MoCap"), 1, 0)
-        g.addWidget(self._mocap_edit, 1, 1)
-        g.addWidget(mocap_btn, 1, 2)
-        g.addWidget(QLabel("Output"), 2, 0)
-        g.addWidget(self._out_edit, 2, 1)
-        g.addWidget(out_btn, 2, 2)
+        for row, (lbl, edit, btn) in enumerate([
+            ("Video",  self._video_edit, video_btn),
+            ("MoCap",  self._mocap_edit, mocap_btn),
+            ("Output", self._out_edit,   out_btn),
+        ]):
+            g.addWidget(QLabel(lbl), row, 0)
+            g.addWidget(edit, row, 1)
+            g.addWidget(btn,  row, 2)
+
         return grp
 
     def _pick_video(self) -> None:
@@ -185,7 +214,7 @@ class ControlPanel(QWidget):
         )
         if path:
             self._video_edit.setText(path)
-            # Default output dir to same folder
+            from pathlib import Path
             if not self._out_edit.text():
                 self._out_edit.setText(str(Path(path).parent))
 
@@ -209,9 +238,10 @@ class ControlPanel(QWidget):
     # ── Parameters ────────────────────────────────────────────────────────────
 
     def _build_params_group(self) -> QGroupBox:
-        grp = QGroupBox("PIPELINE PARAMETERS")
+        grp = QGroupBox("Pipeline Parameters")
         g = QGridLayout(grp)
-        g.setSpacing(4)
+        g.setSpacing(6)
+        g.setColumnStretch(1, 1)
 
         self._side_combo = QComboBox()
         self._side_combo.addItems(["right", "left"])
@@ -239,40 +269,46 @@ class ControlPanel(QWidget):
         self._height_spin.setSpecialValueText("(none)")
 
         rows = [
-            ("Side",        self._side_combo),
-            ("Cutoff",      self._cutoff_spin),
-            ("Filter order",self._order_spin),
-            ("Min vis",     self._minvis_spin),
-            ("Athlete h.",  self._height_spin),
+            ("Visible side",   self._side_combo),
+            ("Filter cutoff",  self._cutoff_spin),
+            ("Filter order",   self._order_spin),
+            ("Min visibility", self._minvis_spin),
+            ("Athlete height", self._height_spin),
         ]
         for row, (label, widget) in enumerate(rows):
-            g.addWidget(QLabel(label), row, 0)
+            lbl = QLabel(label)
+            g.addWidget(lbl,    row, 0)
             g.addWidget(widget, row, 1)
         return grp
 
     # ── Run / progress ────────────────────────────────────────────────────────
 
     def _build_run_group(self) -> QGroupBox:
-        grp = QGroupBox("EXECUTION")
+        grp = QGroupBox("Execution")
         v = QVBoxLayout(grp)
-        v.setSpacing(4)
+        v.setSpacing(6)
 
         btn_row = QHBoxLayout()
-        self._run_btn = QPushButton("RUN ANALYSIS")
+        self._run_btn = QPushButton("Start Analysis")
         self._run_btn.setObjectName("run_btn")
         self._run_btn.clicked.connect(self._on_run_clicked)
+
         self._abort_btn = QPushButton("Abort")
+        self._abort_btn.setObjectName("abort_btn")
         self._abort_btn.setEnabled(False)
         self._abort_btn.clicked.connect(self.abort_requested)
 
-        btn_row.addWidget(self._run_btn)
-        btn_row.addWidget(self._abort_btn)
+        btn_row.addWidget(self._run_btn, stretch=3)
+        btn_row.addWidget(self._abort_btn, stretch=1)
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
+        self._progress.setTextVisible(True)
+        self._progress.setFormat("%p%  (%v / %m frames)")
+
         self._progress_label = QLabel("Idle")
-        self._progress_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._progress_label.setObjectName("status_label")
 
         v.addLayout(btn_row)
         v.addWidget(self._progress)
@@ -302,23 +338,32 @@ class ControlPanel(QWidget):
         self._abort_btn.setEnabled(running)
         if not running:
             self._progress.setValue(0)
+            self._progress.setMaximum(100)
+            self._progress.setFormat("%p%")
             self._progress_label.setText("Idle")
 
     def update_progress(self, frame_idx: int, total_frames: int) -> None:
-        if total_frames > 0:
-            pct = int(frame_idx / total_frames * 100)
-            self._progress.setValue(pct)
-            self._progress_label.setText(f"Frame {frame_idx} / {total_frames}")
+        if self._progress.maximum() != total_frames:
+            self._progress.setMaximum(max(total_frames, 1))
+            self._progress.setFormat(f"%v / {total_frames} frames")
+        self._progress.setValue(frame_idx)
+        self._progress_label.setText(f"Processing frame {frame_idx} of {total_frames}…")
 
-    # ── Skeleton preview ──────────────────────────────────────────────────────
+    # ── Live skeleton preview ─────────────────────────────────────────────────
 
     def _build_preview_group(self) -> QGroupBox:
-        grp = QGroupBox("LIVE SKELETON PREVIEW")
+        grp = QGroupBox("Live Skeleton Preview")
         v = QVBoxLayout(grp)
+        v.setContentsMargins(4, 4, 4, 4)
         self._skeleton = SkeletonPreview()
-        self._skeleton.setMinimumHeight(140)
-        v.addWidget(self._skeleton)
+        self._skeleton.setMinimumHeight(160)
+        v.addWidget(self._skeleton, stretch=1)
         return grp
 
-    def update_skeleton(self, xy: np.ndarray, vis: np.ndarray) -> None:
-        self._skeleton.update_skeleton(xy, vis)
+    def update_skeleton(
+        self,
+        frame_bgr: np.ndarray,
+        xy: np.ndarray,
+        vis: np.ndarray,
+    ) -> None:
+        self._skeleton.update_frame(frame_bgr, xy, vis)

@@ -2,8 +2,11 @@
 QThread worker that runs the drone_mocap pipeline off the GUI thread.
 
 Signals emitted:
-    progress(frame_idx: int, total_frames: int, xy: np.ndarray, vis: np.ndarray)
+    progress(frame_idx, total_frames, frame_bgr, xy, vis)
         — after each pose-inference frame (Pass 1)
+        frame_bgr : (H, W, 3) uint8 BGR frame — used for live skeleton overlay
+        xy        : (33, 2)   float  pixel keypoints
+        vis       : (33,)     float  visibility scores
     finished(out_dir: str)
         — pipeline completed successfully
     error(message: str)
@@ -18,8 +21,9 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 
 class AnalysisWorker(QThread):
-    progress  = pyqtSignal(int, int, np.ndarray, np.ndarray)   # frame_idx, total, xy, vis
-    finished  = pyqtSignal(str)                                  # out_dir path
+    # frame_idx, total_frames, frame_bgr (H×W×3 uint8), xy (33×2), vis (33,)
+    progress  = pyqtSignal(int, int, np.ndarray, np.ndarray, np.ndarray)
+    finished  = pyqtSignal(str)   # out_dir path
     error     = pyqtSignal(str)
 
     def __init__(
@@ -58,7 +62,10 @@ class AnalysisWorker(QThread):
     ) -> None:
         if self._abort:
             raise InterruptedError("Aborted by user.")
-        self.progress.emit(frame_idx, total_frames, xy.copy(), vis.copy())
+        self.progress.emit(
+            frame_idx, total_frames,
+            _frame_bgr.copy(), xy.copy(), vis.copy()
+        )
 
     def run(self) -> None:
         try:

@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
-from app.panels.control_panel import SkeletonPreview
+from app.panels.control_panel import SkeletonPreview  # shared widget
 
 
 class VideoPanel(QWidget):
@@ -87,10 +87,15 @@ class VideoPanel(QWidget):
         self._play_btn.setEnabled(True)
         self._stack.setCurrentIndex(1)
 
-    def update_skeleton(self, xy: np.ndarray, vis: np.ndarray) -> None:
-        """Called during analysis pass 1 — show live skeleton on blank canvas."""
+    def update_skeleton(
+        self,
+        frame_bgr: np.ndarray,
+        xy: np.ndarray,
+        vis: np.ndarray,
+    ) -> None:
+        """Called during analysis pass 1 — show live skeleton overlay on canvas."""
         if self._stack.currentIndex() == 0:
-            self._skeleton_preview.update_skeleton(xy, vis)
+            self._skeleton_preview.update_frame(frame_bgr, xy, vis)
 
     def seek_to_time(self, time_s: float) -> None:
         """Seek the player to the given time (from ChartPanel cursor)."""
