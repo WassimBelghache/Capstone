@@ -1,15 +1,21 @@
 """
 ChartPanel — bottom-left quadrant.
 
-Responsibilities:
-  • White background pyqtgraph plots for Hip / Knee / Ankle
-  • Real-time waveform updates during Pass 1 via push_live_frame():
-      - Attempts on-the-fly angle estimation from raw XY keypoints
-      - Falls back to joint visibility score if drone_mocap is unavailable
-  • Gait-cycle event markers (heel-strike purple, swing-peak amber)
-  • Draggable red cursor InfiniteLine synced bi-directionally with VideoPanel
-  • Emits cursor_moved(float seconds) on drag
-  • Receives set_cursor(float seconds) from VideoPanel
+Plots Hip / Knee / Ankle angle time-series on a white pyqtgraph canvas.
+
+Live mode (during analysis Pass 1)
+    push_live_frame() appends pre-computed angles from the worker and calls
+    setData() on dotted "preview" curves.  Y-axis is pinned to (-30, 180) so
+    data is always visible regardless of pyqtgraph's autoRange state.
+
+Post-analysis (after analysis_complete)
+    load_angles() reads the final CSV and sets solid bold curves, then calls
+    add_gait_regions() with the GaitCycles object from biomechanics.py.
+
+Cursor
+    Dashed Jira-navy InfiniteLine (#0747A6) on the knee plot, x-linked to
+    hip and ankle via mirror lines.  Dragging emits cursor_moved(float s);
+    set_cursor(float s) moves it without re-emitting.
 """
 from __future__ import annotations
 
@@ -18,49 +24,25 @@ from collections import deque
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtWidgets import QVBoxLayout, QWidget, QLabel, QHBoxLayout
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from app.theme import PG_COLORS
 
-try:
-    from scipy.signal import find_peaks
-    _SCIPY_OK = True
-except ImportError:
-    _SCIPY_OK = False
+_CURSOR_COLOR = "#0747A6"
+_STRIDE_ODD   = (7,  82, 204,  25)   # RGBA faint Jira-blue
+_STRIDE_EVEN  = (94, 108, 132, 18)   # RGBA faint slate
 
-# Try importing the angle estimator for live preview
-try:
-    from drone_mocap.angles.saggital2D import joint_angles_sagittal
-    _ANGLE_OK = True
-except ImportError:
-    _ANGLE_OK = False
+# Anatomically-safe default y-range shown before any data arrives.
+# Angles outside this range still auto-expand the view via autoRange().
+_Y_MIN, _Y_MAX = -30.0, 180.0
 
-# Joint keypoint indices used for live visibility fallback
-_VIS_IDX = {
-    "hip":   (23, 24),
-    "knee":  (25, 26),
-    "ankle": (27, 28),
-}
-
-
-def _detect_gait_events(
-    knee_deg: np.ndarray,
-    time_s: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    if not _SCIPY_OK or len(knee_deg) < 10:
-        return np.array([]), np.array([])
-    valid = np.isfinite(knee_deg)
-    if valid.sum() < 10:
-        return np.array([]), np.array([])
-    min_distance = max(5, int(len(knee_deg) * 0.04))
-    hs_idx, _ = find_peaks(-knee_deg, distance=min_distance, prominence=5.0)
-    sw_idx, _ = find_peaks( knee_deg, distance=min_distance, prominence=5.0)
-    return time_s[hs_idx], time_s[sw_idx]
+_VIS_IDX = {"hip": (23, 24), "knee": (25, 26), "ankle": (27, 28)}
 
 
 class ChartPanel(QWidget):
-    cursor_moved = pyqtSignal(float)
+    cursor_moved  = pyqtSignal(float)
+    stride_jumped = pyqtSignal(float)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -68,175 +50,184 @@ class ChartPanel(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(0)
 
-        # Header row: title + live indicator
-        header = QHBoxLayout()
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr = QHBoxLayout()
         title = QLabel("KINEMATIC WAVEFORMS")
         title.setObjectName("section_title")
         self._live_badge = QLabel("  LIVE  ")
         self._live_badge.setObjectName("section_title")
         self._live_badge.setStyleSheet(
-            "background-color: #36B37E; color: #FFFFFF; border-radius: 3px;"
-            "padding: 1px 5px; font-size: 10px; font-weight: 700;"
+            "background:#36B37E; color:#FFFFFF; border-radius:3px;"
+            "padding:1px 6px; font-size:10px; font-weight:700;"
         )
         self._live_badge.setVisible(False)
-        header.addWidget(title)
-        header.addStretch()
-        header.addWidget(self._live_badge)
-        layout.addLayout(header)
+        self._stride_label = QLabel("")
+        self._stride_label.setStyleSheet("color:#5E6C84; font-size:10px;")
+        hdr.addWidget(title)
+        hdr.addStretch()
+        hdr.addWidget(self._stride_label)
+        hdr.addWidget(self._live_badge)
+        layout.addLayout(hdr)
 
-        # pyqtgraph — white background
+        # ── pyqtgraph ─────────────────────────────────────────────────────────
         pg.setConfigOptions(antialias=True, foreground=PG_COLORS["axis_text"])
-        self._plot_widget = pg.GraphicsLayoutWidget()
-        self._plot_widget.setBackground(PG_COLORS["bg"])
-        layout.addWidget(self._plot_widget, stretch=1)
+        self._gw = pg.GraphicsLayoutWidget()
+        self._gw.setBackground(PG_COLORS["bg"])
+        layout.addWidget(self._gw, stretch=1)
 
-        self._plots:  dict[str, pg.PlotItem]     = {}
-        self._curves: dict[str, pg.PlotDataItem] = {}
+        self._plots:       dict[str, pg.PlotItem]     = {}
+        self._curves:      dict[str, pg.PlotDataItem] = {}
         self._live_curves: dict[str, pg.PlotDataItem] = {}
-        self._cursor: pg.InfiniteLine | None = None
-        self._gait_lines: list = []
+        self._cursor:      pg.InfiniteLine | None = None
+        self._gait_items:  list = []
 
         # Live data buffers
-        self._live_t:    deque[float] = deque(maxlen=3000)
+        self._live_t:    deque[float]            = deque(maxlen=4000)
         self._live_vals: dict[str, deque[float]] = {
-            j: deque(maxlen=3000) for j in ("hip", "knee", "ankle")
+            j: deque(maxlen=4000) for j in ("hip", "knee", "ankle")
         }
-        self._fps_estimate: float = 30.0
-        self._live_side: str = "right"
+        self._live_side: str   = "right"
+        self._live_fps:  float = 30.0
 
         self._build_plots()
 
     # ── Build ─────────────────────────────────────────────────────────────────
 
     def _build_plots(self) -> None:
-        joints = [
-            ("hip",   "Hip (°)",   0),
-            ("knee",  "Knee (°)",  1),
-            ("ankle", "Ankle (°)", 2),
+        joints_cfg = [
+            ("hip",   "Hip  (°)"),
+            ("knee",  "Knee  (°)"),
+            ("ankle", "Ankle  (°)"),
         ]
-        prev_plot = None
-        for joint, ylabel, row in joints:
-            plot = self._plot_widget.addPlot(row=row, col=0)
-            plot.setMenuEnabled(False)
-            plot.setLabel("left", ylabel,
-                          color=PG_COLORS[joint], size="10pt")
-            plot.showGrid(x=True, y=True, alpha=0.4)
+        prev = None
+        for row, (joint, ylabel) in enumerate(joints_cfg):
+            p = self._gw.addPlot(row=row, col=0)
+            p.setMenuEnabled(False)
+            p.setLabel("left", ylabel, color=PG_COLORS[joint], size="10pt")
+            p.showGrid(x=True, y=True, alpha=0.35)
+            p.getViewBox().setBackgroundColor(PG_COLORS["bg"])
 
-            # White background per plot
-            plot.getViewBox().setBackgroundColor(PG_COLORS["bg"])
-
-            # Axis styling (light-theme axes)
-            for axis_name in ("bottom", "left", "top", "right"):
-                ax = plot.getAxis(axis_name)
+            for ax_name in ("bottom", "left", "top", "right"):
+                ax = p.getAxis(ax_name)
                 ax.setPen(pg.mkPen(PG_COLORS["grid"], width=1))
                 ax.setTextPen(pg.mkPen(PG_COLORS["axis_text"]))
 
-            if prev_plot is not None:
-                plot.setXLink(prev_plot)
-            prev_plot = plot
+            # Pin Y to anatomical range — prevents the "collapsed to [0,0]" trap.
+            # setClipToView is safe here because the range is always defined.
+            p.setYRange(_Y_MIN, _Y_MAX, padding=0.05)
 
-            # Final smoothed curve (bold, solid)
-            curve = plot.plot(
-                pen=pg.mkPen(PG_COLORS[joint], width=2.0),
-                name=joint,
-            )
-            # Live preview curve (thinner, semi-transparent)
-            live_curve = plot.plot(
-                pen=pg.mkPen(PG_COLORS[joint], width=1.0, style=Qt.PenStyle.DotLine),
+            if prev is not None:
+                p.setXLink(prev)
+            prev = p
+
+            # Final smoothed curve (bold solid)
+            curve = p.plot(pen=pg.mkPen(PG_COLORS[joint], width=2.2), name=joint)
+            curve.setDownsampling(auto=True)
+
+            # Live preview curve (thin dotted) — no setClipToView because the
+            # X-range grows as frames arrive and clipping would hide all data
+            live = p.plot(
+                pen=pg.mkPen(PG_COLORS[joint], width=1.0,
+                             style=Qt.PenStyle.DotLine),
                 name=f"{joint}_live",
             )
-            self._plots[joint]       = plot
-            self._curves[joint]      = curve
-            self._live_curves[joint] = live_curve
+            live.setDownsampling(auto=True)
 
-        # Cursor on knee plot (xLinked to all others)
+            self._plots[joint]       = p
+            self._curves[joint]      = curve
+            self._live_curves[joint] = live
+
+        # Cursor on knee plot (x-linked to all via setXLink)
         knee_plot = self._plots["knee"]
         self._cursor = pg.InfiniteLine(
             pos=0.0, angle=90, movable=True,
-            pen=pg.mkPen(PG_COLORS["cursor"], width=1.5,
+            pen=pg.mkPen(_CURSOR_COLOR, width=1.5,
                          style=Qt.PenStyle.DashLine),
-            hoverPen=pg.mkPen(PG_COLORS["cursor"], width=2.5),
+            hoverPen=pg.mkPen(_CURSOR_COLOR, width=2.5),
         )
         self._cursor.sigPositionChanged.connect(self._on_cursor_moved)
         knee_plot.addItem(self._cursor)
 
         for joint in ("hip", "ankle"):
-            mirror = pg.InfiniteLine(
+            m = pg.InfiniteLine(
                 pos=0.0, angle=90, movable=False,
-                pen=pg.mkPen(PG_COLORS["cursor"], width=1.5,
+                pen=pg.mkPen(_CURSOR_COLOR, width=1.5,
                              style=Qt.PenStyle.DashLine),
             )
-            self._plots[joint].addItem(mirror)
-            setattr(self, f"_cursor_mirror_{joint}", mirror)
+            self._plots[joint].addItem(m)
+            setattr(self, f"_mirror_{joint}", m)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def set_live_mode(self, active: bool, side: str = "right", fps: float = 30.0) -> None:
         self._live_badge.setVisible(active)
         self._live_side = side
-        self._fps_estimate = fps
+        self._live_fps  = fps
         if active:
             self._live_t.clear()
-            for buf in self._live_vals.values():
-                buf.clear()
+            for b in self._live_vals.values():
+                b.clear()
+            # Reset X-range to show from t=0; Y stays pinned to (_Y_MIN, _Y_MAX)
+            for p in self._plots.values():
+                p.setXRange(0, 5, padding=0)          # show first 5 s; auto-expands
+                p.setYRange(_Y_MIN, _Y_MAX, padding=0.05)
 
     def push_live_frame(
         self,
         frame_idx: int,
         total_frames: int,
-        xy: np.ndarray,
         vis: np.ndarray,
+        angles: object,    # dict[str, float] from worker, or {}
     ) -> None:
         """
-        Called on every progress signal during Pass 1.
-        Attempts live angle estimation; falls back to visibility proxy.
+        Called on every throttled progress signal.
+        angles are pre-computed in the worker thread (not GUI thread).
         """
-        t = frame_idx / self._fps_estimate
+        t = frame_idx / self._live_fps
         self._live_t.append(t)
 
-        if _ANGLE_OK:
-            try:
-                ang = joint_angles_sagittal(
-                    xy, vis,
-                    visible_side=self._live_side,
-                    min_vis=0.2,
-                )
-                self._live_vals["hip"].append(ang.get("hip", np.nan))
-                self._live_vals["knee"].append(ang.get("knee", np.nan))
-                self._live_vals["ankle"].append(ang.get("ankle", np.nan))
-            except Exception:
-                self._push_vis_proxy(xy, vis)
+        if angles:
+            ang = angles  # type: ignore[assignment]
+            self._live_vals["hip"].append(ang.get("hip", np.nan))
+            self._live_vals["knee"].append(ang.get("knee", np.nan))
+            self._live_vals["ankle"].append(ang.get("ankle", np.nan))
+
+            # Debug: confirm data is flowing
+            print(f"UI received angles: hip={ang.get('hip'):.1f}  "
+                  f"knee={ang.get('knee'):.1f}  ankle={ang.get('ankle'):.1f}  t={t:.2f}s")
         else:
-            self._push_vis_proxy(xy, vis)
+            self._push_vis_proxy(vis)
 
-        # Update live curves every 3 frames to avoid hammering the GUI thread
-        if frame_idx % 3 == 0:
-            t_arr = np.fromiter(self._live_t, dtype=float)
-            for joint, buf in self._live_vals.items():
-                v_arr = np.fromiter(buf, dtype=float)
-                if len(t_arr) == len(v_arr) and len(t_arr) > 1:
-                    self._live_curves[joint].setData(t_arr, v_arr)
+        t_arr = np.fromiter(self._live_t, dtype=float)
+        for joint, buf in self._live_vals.items():
+            v_arr = np.fromiter(buf, dtype=float)
+            n = min(len(t_arr), len(v_arr))
+            if n >= 1:
+                self._live_curves[joint].setData(t_arr[:n], v_arr[:n])
 
-    def _push_vis_proxy(self, xy: np.ndarray, vis: np.ndarray) -> None:
-        """Fallback: scale visibility [0,1] to [-20, 80] as a proxy waveform."""
+        # Auto-expand X-axis as time advances (Y stays pinned)
+        if len(t_arr) > 1:
+            self._plots["knee"].setXRange(
+                float(t_arr[0]), float(t_arr[-1]) + 0.5, padding=0
+            )
+
+    def _push_vis_proxy(self, vis: np.ndarray) -> None:
         for joint, (i, j) in _VIS_IDX.items():
-            avg_vis = float((vis[i] + vis[j]) / 2) if len(vis) > max(i, j) else 0.0
-            self._live_vals[joint].append(avg_vis * 100.0 - 20.0)
+            avg = float((vis[i] + vis[j]) / 2) if len(vis) > max(i, j) else 0.0
+            self._live_vals[joint].append(avg * 100.0 - 20.0)
 
     def clear(self) -> None:
-        for curve in list(self._curves.values()) + list(self._live_curves.values()):
-            curve.setData([], [])
-        for line in self._gait_lines:
-            for plot in self._plots.values():
-                try:
-                    plot.removeItem(line)
-                except Exception:
-                    pass
-        self._gait_lines.clear()
+        for c in list(self._curves.values()) + list(self._live_curves.values()):
+            c.setData([], [])
+        self._remove_gait_items()
         self._live_badge.setVisible(False)
+        self._stride_label.setText("")
+        # Reset Y-range to default so incoming live data is visible
+        for p in self._plots.values():
+            p.setYRange(_Y_MIN, _Y_MAX, padding=0.05)
 
     def load_angles(self, csv_path: str) -> None:
-        """Load final smoothed angles from the output CSV and replace live curves."""
+        """Load final smoothed angles from CSV; replace live dotted curves."""
         try:
             df = pd.read_csv(csv_path)
         except Exception:
@@ -244,29 +235,101 @@ class ChartPanel(QWidget):
         if "time_s" not in df.columns:
             return
 
-        t = df["time_s"].to_numpy(float)
+        t = df["time_s"].to_numpy(dtype=float)
+
         col_map: dict[str, str] = {}
         for col in df.columns:
             lc = col.lower()
-            if "hip"   in lc: col_map["hip"]   = col
-            elif "knee" in lc: col_map["knee"]  = col
-            elif "ankle" in lc: col_map["ankle"] = col
+            if   "hip"   in lc and "hip"   not in col_map: col_map["hip"]   = col
+            elif "knee"  in lc and "knee"  not in col_map: col_map["knee"]  = col
+            elif "ankle" in lc and "ankle" not in col_map: col_map["ankle"] = col
 
         for joint, col in col_map.items():
-            if joint in self._curves and col in df.columns:
-                self._curves[joint].setData(t, df[col].to_numpy(float))
-            # Clear live preview — real data has replaced it
-            self._live_curves[joint].setData([], [])
+            vals = df[col].to_numpy(dtype=float)
+            if joint in self._curves:
+                self._curves[joint].setData(t, vals)
+            if joint in self._live_curves:
+                self._live_curves[joint].setData([], [])
 
-        if "knee" in col_map:
-            knee_deg = df[col_map["knee"]].to_numpy(float)
-            hs_times, sw_times = _detect_gait_events(knee_deg, t)
-            self._draw_gait_events(hs_times, sw_times)
+        # Refit X-range to data; Y re-pins to anatomical range with padding
+        for p in self._plots.values():
+            p.setYRange(_Y_MIN, _Y_MAX, padding=0.05)
+        if len(t):
+            self._plots["knee"].setXRange(float(t[0]), float(t[-1]), padding=0.02)
 
         if self._cursor is not None and len(t):
             self._cursor.setValue(float(t[0]))
 
         self._live_badge.setVisible(False)
+
+    def add_gait_regions(self, cycles) -> None:
+        """
+        Draw stride bands and event lines from a GaitCycles object.
+
+        Parameters
+        ----------
+        cycles : app.utils.biomechanics.GaitCycles
+        """
+        self._remove_gait_items()
+        hs = cycles.heel_strike_times
+        sw = cycles.swing_peak_times
+
+        if len(hs) == 0:
+            return
+
+        # ── Stride bands ─────────────────────────────────────────────────────
+        boundaries = list(hs)
+        if len(sw) and sw[-1] > boundaries[-1]:
+            boundaries.append(float(sw[-1]))
+        elif len(boundaries) > 1:
+            boundaries.append(boundaries[-1] + cycles.mean_stride_s)
+
+        for idx in range(len(boundaries) - 1):
+            t_start = float(boundaries[idx])
+            t_end   = float(boundaries[idx + 1])
+            color   = _STRIDE_ODD if idx % 2 == 0 else _STRIDE_EVEN
+            for plot in self._plots.values():
+                region = _ClickableRegion(t_start, t_end, color,
+                                          self._on_stride_clicked)
+                plot.addItem(region)
+                self._gait_items.append(region)
+
+        # ── Heel-strike lines ─────────────────────────────────────────────────
+        for t_hs in hs:
+            for plot in self._plots.values():
+                line = pg.InfiniteLine(
+                    pos=float(t_hs), angle=90, movable=False,
+                    pen=pg.mkPen(PG_COLORS["gait_hs"], width=1.0,
+                                 style=Qt.PenStyle.DotLine),
+                    label="HS", labelOpts={"position": 0.92, "color": PG_COLORS["gait_hs"],
+                                           "fill": (255, 255, 255, 120)},
+                )
+                plot.addItem(line)
+                self._gait_items.append(line)
+
+        # ── Swing-peak lines ──────────────────────────────────────────────────
+        for t_sw in sw:
+            for plot in self._plots.values():
+                line = pg.InfiniteLine(
+                    pos=float(t_sw), angle=90, movable=False,
+                    pen=pg.mkPen(PG_COLORS["gait_swing"], width=0.8,
+                                 style=Qt.PenStyle.DotLine),
+                )
+                plot.addItem(line)
+                self._gait_items.append(line)
+
+        # ── Stride statistics label ───────────────────────────────────────────
+        n = cycles.n_strides
+        if n > 0:
+            cadence = cycles.cadence_steps_per_min
+            mean_s  = cycles.mean_stride_s
+            self._stride_label.setText(
+                f"{n} stride{'s' if n != 1 else ''}  ·  "
+                f"{mean_s:.2f} s/stride  ·  "
+                f"{cadence:.0f} steps/min"
+            )
+        else:
+            self._stride_label.setText(f"{len(hs)} heel-strike detected")
 
     def set_cursor(self, time_s: float) -> None:
         if self._cursor is None:
@@ -285,27 +348,39 @@ class ChartPanel(QWidget):
 
     def _sync_mirrors(self, t: float) -> None:
         for joint in ("hip", "ankle"):
-            m = getattr(self, f"_cursor_mirror_{joint}", None)
+            m = getattr(self, f"_mirror_{joint}", None)
             if m is not None:
                 m.setValue(t)
 
-    def _draw_gait_events(
-        self, hs_times: np.ndarray, sw_times: np.ndarray
-    ) -> None:
-        for plot in self._plots.values():
-            for t_hs in hs_times:
-                line = pg.InfiniteLine(
-                    pos=float(t_hs), angle=90, movable=False,
-                    pen=pg.mkPen(PG_COLORS["gait_hs"], width=0.9,
-                                 style=Qt.PenStyle.DotLine),
-                )
-                plot.addItem(line)
-                self._gait_lines.append(line)
-            for t_sw in sw_times:
-                line = pg.InfiniteLine(
-                    pos=float(t_sw), angle=90, movable=False,
-                    pen=pg.mkPen(PG_COLORS["gait_swing"], width=0.9,
-                                 style=Qt.PenStyle.DotLine),
-                )
-                plot.addItem(line)
-                self._gait_lines.append(line)
+    def _remove_gait_items(self) -> None:
+        for item in self._gait_items:
+            for plot in self._plots.values():
+                try:
+                    plot.removeItem(item)
+                except Exception:
+                    pass
+        self._gait_items.clear()
+
+    def _on_stride_clicked(self, t_start: float) -> None:
+        self.set_cursor(t_start)
+        self.stride_jumped.emit(t_start)
+
+
+class _ClickableRegion(pg.LinearRegionItem):
+    def __init__(self, t_start, t_end, color, callback):
+        super().__init__(
+            values=(t_start, t_end),
+            movable=False,
+            brush=pg.mkBrush(*color),
+            pen=pg.mkPen(None),
+        )
+        self._t_start = t_start
+        self._cb = callback
+        self.setZValue(-10)
+
+    def mouseClickEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self._cb(self._t_start)
+            ev.accept()
+        else:
+            super().mouseClickEvent(ev)

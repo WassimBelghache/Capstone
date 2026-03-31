@@ -6,9 +6,10 @@ Responsibilities:
   • Pipeline parameter inputs (side, cutoff Hz, order, min_vis, height)
   • Output directory selection
   • RUN / ABORT button + progress bar
-  • Live skeleton overlay: QPainter draws 33 MediaPipe landmarks over a
-    dimmed BGR frame — proving the AI sees the athlete in real-time.
   • Emits run_requested(dict) and abort_requested()
+
+Note: the live skeleton overlay lives exclusively in VideoPanel (right-top).
+SkeletonPreview is defined here at module level so VideoPanel can import it.
 """
 from __future__ import annotations
 
@@ -41,29 +42,43 @@ _JOINT_LOW   = QColor("#FF5630")   # red when vis < 0.3
 
 class SkeletonPreview(QWidget):
     """
-    Renders a live skeleton overlaid on the most-recent BGR video frame.
+    Renders a live skeleton overlaid on a pre-processed RGB video frame.
 
-    The frame is dimmed to 55% brightness so the skeleton stands out.
-    Limbs are drawn in Jira-blue; joints are white (red when low-confidence).
+    The worker pre-converts BGR→RGB, downsamples to ≤480px wide, and computes
+    angles. This widget just draws — no heavy numpy work on the GUI thread.
+
+    xy coordinates are in the ORIGINAL frame's pixel space; we scale them
+    to the displayed (downsampled) frame region in to_canvas().
     """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setMinimumSize(220, 150)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._frame_bgr: np.ndarray | None = None
-        self._xy:        np.ndarray | None = None
-        self._vis:       np.ndarray | None = None
+        self._pixmap:   QPixmap | None = None   # pre-built in update_frame
+        self._xy:       np.ndarray | None = None
+        self._vis:      np.ndarray | None = None
+        self._orig_w:   int = 1              # original frame width (for kp scaling)
+        self._orig_h:   int = 1
 
     def update_frame(
         self,
-        frame_bgr: np.ndarray,
-        xy: np.ndarray,
+        rgb_small: np.ndarray,   # pre-converted RGB, downsampled
+        xy: np.ndarray,          # keypoints in ORIGINAL pixel coords
         vis: np.ndarray,
+        orig_w: int = 0,         # original frame width (0 = same as rgb_small)
+        orig_h: int = 0,
     ) -> None:
-        self._frame_bgr = frame_bgr
-        self._xy        = xy
-        self._vis       = vis
+        fh, fw = rgb_small.shape[:2]
+        # Dim in-place on the small array — much cheaper than full-res dimming
+        dimmed = (rgb_small.astype(np.uint8) >> 1)   # fast ~50% dim via bit-shift
+        dimmed = np.ascontiguousarray(dimmed)
+        qimg = QImage(dimmed.data, fw, fh, fw * 3, QImage.Format.Format_RGB888)
+        self._pixmap  = QPixmap.fromImage(qimg)
+        self._xy      = xy
+        self._vis     = vis
+        self._orig_w  = orig_w if orig_w > 0 else fw
+        self._orig_h  = orig_h if orig_h > 0 else fh
         self.update()   # triggers paintEvent
 
     def paintEvent(self, event) -> None:
@@ -72,42 +87,32 @@ class SkeletonPreview(QWidget):
         w, h = self.width(), self.height()
 
         # ── Background ──────────────────────────────────────────────────────
-        if self._frame_bgr is not None:
-            frame = self._frame_bgr
-            fh, fw = frame.shape[:2]
-            # Convert BGR → RGB
-            rgb = frame[:, :, ::-1].copy()
-            # Dim to 55% brightness
-            rgb = (rgb.astype(np.float32) * 0.55).clip(0, 255).astype(np.uint8)
-            # Ensure contiguous memory for QImage
-            rgb = np.ascontiguousarray(rgb)
-            qimg = QImage(rgb.data, fw, fh, fw * 3, QImage.Format.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimg).scaled(
+        if self._pixmap is not None:
+            pm = self._pixmap.scaled(
                 w, h,
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+                Qt.TransformationMode.FastTransformation,   # cheaper than Smooth
             )
-            # Centre the frame
-            x_off = (w - pixmap.width())  // 2
-            y_off = (h - pixmap.height()) // 2
-            painter.drawPixmap(x_off, y_off, pixmap)
+            x_off = (w - pm.width())  // 2
+            y_off = (h - pm.height()) // 2
+            painter.drawPixmap(x_off, y_off, pm)
 
-            # ── Scale keypoints to the displayed region ──────────────────────
-            scale  = min(w / fw, h / fh)
-            ox     = (w - fw * scale) / 2
-            oy     = (h - fh * scale) / 2
+            # ── Scale keypoints: original-frame coords → canvas coords ───────
+            # kp_scale maps original pixel → displayed-pixmap pixel
+            kp_scale = min(pm.width() / self._orig_w, pm.height() / self._orig_h)
+            ox = x_off + (pm.width()  - self._orig_w * kp_scale) / 2
+            oy = y_off + (pm.height() - self._orig_h * kp_scale) / 2
 
             def to_canvas(pt: np.ndarray) -> tuple[int, int]:
-                return int(pt[0] * scale + ox), int(pt[1] * scale + oy)
+                return int(pt[0] * kp_scale + ox), int(pt[1] * kp_scale + oy)
 
         else:
-            # Blank slate before first frame arrives
             painter.fillRect(0, 0, w, h, QColor("#EBECF0"))
             painter.setPen(QColor("#A5ADBA"))
             painter.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
-                "Waiting for analysis…",
+                "Waiting for analysis\u2026",
             )
             return
 
@@ -165,7 +170,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self._build_files_group())
         layout.addWidget(self._build_params_group())
         layout.addWidget(self._build_run_group())
-        layout.addWidget(self._build_preview_group(), stretch=1)
+        layout.addStretch()
 
     # ── File selection ────────────────────────────────────────────────────────
 
@@ -349,21 +354,3 @@ class ControlPanel(QWidget):
         self._progress.setValue(frame_idx)
         self._progress_label.setText(f"Processing frame {frame_idx} of {total_frames}…")
 
-    # ── Live skeleton preview ─────────────────────────────────────────────────
-
-    def _build_preview_group(self) -> QGroupBox:
-        grp = QGroupBox("Live Skeleton Preview")
-        v = QVBoxLayout(grp)
-        v.setContentsMargins(4, 4, 4, 4)
-        self._skeleton = SkeletonPreview()
-        self._skeleton.setMinimumHeight(160)
-        v.addWidget(self._skeleton, stretch=1)
-        return grp
-
-    def update_skeleton(
-        self,
-        frame_bgr: np.ndarray,
-        xy: np.ndarray,
-        vis: np.ndarray,
-    ) -> None:
-        self._skeleton.update_frame(frame_bgr, xy, vis)
