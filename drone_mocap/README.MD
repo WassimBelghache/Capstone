@@ -24,3 +24,13 @@ poetry run drone-mocap evaluate \
 `
 Windows:
 poetry run drone-mocap analyze --video "C:\Users\wassi\Downloads\M_Treadmill_Jogging.mp4" --athlete-height-m 1.73 --side right
+
+
+
+For gui.py: 
+
+poetry install
+
+poetry run pyhton gui.py
+
+if first time doesn't work just run again
