@@ -25,7 +25,7 @@ class MediaPipePoseEstimator:
         self.mp_pose = mp.solutions.pose
         self.pose = self.mp_pose.Pose(
             static_image_mode=False,
-            model_complexity=1,
+            model_complexity=2,
             enable_segmentation=False,
             smooth_landmarks=False,  # we do our own smoothing
             min_detection_confidence=0.5,

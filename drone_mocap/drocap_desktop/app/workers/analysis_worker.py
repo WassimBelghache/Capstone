@@ -85,6 +85,7 @@ class AnalysisWorker(QThread):
         parent=None,
     ) -> None:
         super().__init__(parent)
+        self.setStackSize(8 * 1024 * 1024)
         self.video_path       = video_path
         self.out_root         = out_root
         self.mocap_path       = mocap_path
@@ -143,6 +144,8 @@ class AnalysisWorker(QThread):
             if IS_BUNDLE:
                 import os, sys
                 os.chdir(sys._MEIPASS)  # type: ignore[attr-defined]
+                os.environ["OPENBLAS_NUM_THREADS"] = "1"
+                os.environ["MKL_NUM_THREADS"] = "1"
 
             out_dir = run_pipeline(
                 video            = Path(self.video_path),
