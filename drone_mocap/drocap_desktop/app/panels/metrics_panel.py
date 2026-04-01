@@ -17,12 +17,14 @@ from pathlib import Path
 import numpy as np
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -134,15 +136,27 @@ class _AccuracyBadge(QFrame):
 
 
 class MetricsPanel(QWidget):
+    export_requested = pyqtSignal()   # consumed by MainWindow
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
 
-        # ── Accuracy badge ────────────────────────────────────────────────────
+        # ── Header row: badge + export button ────────────────────────────────
+        top_row = QHBoxLayout()
         self._badge = _AccuracyBadge()
-        layout.addWidget(self._badge)
+        top_row.addWidget(self._badge, stretch=1)
+
+        self._export_btn = QPushButton("Export PDF")
+        self._export_btn.setObjectName("export_btn")
+        self._export_btn.setEnabled(False)
+        self._export_btn.setToolTip("Save a branded PDF report of this analysis")
+        self._export_btn.clicked.connect(self.export_requested)
+        top_row.addWidget(self._export_btn, stretch=0)
+
+        layout.addLayout(top_row)
 
         # ── Metrics table ─────────────────────────────────────────────────────
         grp = QGroupBox("Comparison Metrics")
@@ -181,6 +195,7 @@ class MetricsPanel(QWidget):
             self._set_row(row, joint.capitalize(), "—", "—", "—", "—")
         self._badge.reset()
         self._footer.setText("")
+        self._export_btn.setEnabled(False)
 
     def load_metrics(self, json_path: str) -> None:
         try:
@@ -211,6 +226,7 @@ class MetricsPanel(QWidget):
         # Update accuracy badge
         grade, label, color = _overall_grade(r_values)
         self._badge.update(grade, label, color)
+        self._export_btn.setEnabled(True)
 
         # Footer alignment notes
         parts = []

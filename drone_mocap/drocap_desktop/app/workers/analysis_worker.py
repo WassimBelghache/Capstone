@@ -130,7 +130,7 @@ class AnalysisWorker(QThread):
 
     def run(self) -> None:
         try:
-            import time
+            import gc
             from drone_mocap.pipeline.run import run_pipeline
 
             out_dir = run_pipeline(
@@ -145,10 +145,23 @@ class AnalysisWorker(QThread):
                 diagnostic_video = True,
                 on_progress      = self._on_progress,
             )
-            # Allow the GUI event loop to drain any queued progress signals
-            # before the finished signal triggers post-analysis loading.
-            time.sleep(0.5)
+
+            # ── Clean-exit buffer ────────────────────────────────────────────
+            # run_pipeline has returned; all cv2 captures/writers are already
+            # released inside the pipeline.  gc.collect() forces any lingering
+            # reference-counted C-extension objects (OpenCV, MediaPipe) to be
+            # finalized before we signal the UI — this flushes OS write buffers
+            # for the .mp4 and .csv so QMediaPlayer / pandas won't see partial files.
+            gc.collect()
+
+            # msleep gives Qt's event loop a chance to drain any queued
+            # progress signals that arrived just before the pipeline returned.
+            # Using QThread.msleep (not time.sleep) keeps the sleep cooperative
+            # with the Qt event system and avoids blocking the OS scheduler.
+            self.msleep(500)
+
             self.finished.emit(str(out_dir))
+
         except InterruptedError:
             self.error.emit("Analysis cancelled.")
         except Exception as exc:  # noqa: BLE001

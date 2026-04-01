@@ -184,21 +184,24 @@ class ControlPanel(QWidget):
         self._video_edit.setPlaceholderText("Select video file…")
         self._video_edit.setReadOnly(True)
         video_btn = QPushButton("Browse")
-        video_btn.setFixedWidth(60)
+        video_btn.setObjectName("browse_btn")
+        video_btn.setFixedWidth(72)
         video_btn.clicked.connect(self._pick_video)
 
         self._mocap_edit = QLineEdit()
         self._mocap_edit.setPlaceholderText("MoCap reference (optional)")
         self._mocap_edit.setReadOnly(True)
         mocap_btn = QPushButton("Browse")
-        mocap_btn.setFixedWidth(60)
+        mocap_btn.setObjectName("browse_btn")
+        mocap_btn.setFixedWidth(72)
         mocap_btn.clicked.connect(self._pick_mocap)
 
         self._out_edit = QLineEdit()
         self._out_edit.setPlaceholderText("Output directory…")
         self._out_edit.setReadOnly(True)
         out_btn = QPushButton("Browse")
-        out_btn.setFixedWidth(60)
+        out_btn.setObjectName("browse_btn")
+        out_btn.setFixedWidth(72)
         out_btn.clicked.connect(self._pick_outdir)
 
         for row, (lbl, edit, btn) in enumerate([
@@ -339,6 +342,7 @@ class ControlPanel(QWidget):
         self.run_requested.emit(params)
 
     def set_running(self, running: bool) -> None:
+        self._run_btn.setText("Start Analysis")   # always reset label
         self._run_btn.setEnabled(not running)
         self._abort_btn.setEnabled(running)
         if not running:
@@ -346,6 +350,17 @@ class ControlPanel(QWidget):
             self._progress.setMaximum(100)
             self._progress.setFormat("%p%")
             self._progress_label.setText("Idle")
+
+    def set_finalizing(self) -> None:
+        """Intermediate state between analysis complete and results loaded.
+
+        Disables both buttons and shows 'Finalizing...' text so the user
+        knows the app is alive during the staggered loading waterfall.
+        """
+        self._run_btn.setText("Finalizing\u2026")
+        self._run_btn.setEnabled(False)
+        self._abort_btn.setEnabled(False)
+        self._progress_label.setText("Loading results\u2026")
 
     def update_progress(self, frame_idx: int, total_frames: int) -> None:
         if self._progress.maximum() != total_frames:
