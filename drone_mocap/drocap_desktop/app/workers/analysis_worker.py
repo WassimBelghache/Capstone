@@ -131,7 +131,18 @@ class AnalysisWorker(QThread):
     def run(self) -> None:
         try:
             import gc
+            from app.utils.bundle import IS_BUNDLE, resource_path
             from drone_mocap.pipeline.run import run_pipeline
+
+            # ── MediaPipe bundle fix ─────────────────────────────────────────
+            # MediaPipe's C++ calculator framework resolves .binarypb and
+            # .tflite paths relative to CWD (or the mediapipe package dir).
+            # In the PyInstaller bundle, setup_bundle_env() already set
+            # CWD to _MEIPASS — but confirm it here in the worker thread too,
+            # because macOS may reset the per-thread CWD on some versions.
+            if IS_BUNDLE:
+                import os, sys
+                os.chdir(sys._MEIPASS)  # type: ignore[attr-defined]
 
             out_dir = run_pipeline(
                 video            = Path(self.video_path),
