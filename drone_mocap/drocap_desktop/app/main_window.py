@@ -43,6 +43,8 @@ class MainWindow(QMainWindow):
 
         self._worker: AnalysisWorker | None = None
         self._video_fps: float = 30.0
+        self._last_out_dir: str | None = None   # for PDF export
+        self._last_gait_cycles = None           # GaitCycles | None
 
         # ── Panels ───────────────────────────────────────────────────────────
         self.control_panel = ControlPanel()
@@ -98,6 +100,8 @@ class MainWindow(QMainWindow):
         self.chart_panel.cursor_moved.connect(self.video_panel.seek_to_time)
         self.video_panel.time_changed.connect(self.chart_panel.set_cursor)
         self.chart_panel.stride_jumped.connect(self.video_panel.seek_to_time)
+
+        self.metrics_panel.export_requested.connect(self._export_pdf)
 
     # ── Analysis lifecycle ────────────────────────────────────────────────────
 
@@ -188,30 +192,52 @@ class MainWindow(QMainWindow):
             )
 
     def _on_finished(self, out_dir: str) -> None:
-        self.control_panel.set_running(False)
+        # ── Immediate: sever the worker ───────────────────────────────────────
+        # Disconnect signals first — no more zombie progress/error signals.
+        self._disconnect_worker()
+
+        # Transition button to "Finalizing…" while results load.
+        # set_running(False) is deferred to the last waterfall step.
+        self.control_panel.set_finalizing()
         self._global_progress.setValue(self._global_progress.maximum())
-        self._set_status("Analysis complete — loading results\u2026")
+        self._set_status("Processing results\u2026")
+        self._last_out_dir = out_dir
 
         out          = Path(out_dir)
         angles_csv   = out / "derived" / "angles_sagittal.csv"
         metrics_json = out / "reports"  / "metrics_mocap.json"
 
-        # Step 1 (immediate) — metrics table; fast JSON load, unblocks the UI first
-        if metrics_json.exists():
-            self.metrics_panel.load_metrics(str(metrics_json))
+        # Tear down the QThread object safely.
+        # run() has already returned (that's what caused this signal), so
+        # wait() returns immediately — but we defer to the next event loop
+        # iteration (delay=0) so the current signal delivery is fully unwound
+        # before we join the thread.
+        if self._worker is not None:
+            _w = self._worker
+            self._worker = None
+            QTimer.singleShot(0, lambda: (_w.wait(), _w.deleteLater()))
 
-        # Step 2 (100 ms) — load smoothed angle curves into chart
-        def _load_chart():
+        # ── Waterfall loading ─────────────────────────────────────────────────
+        # Each step runs in a separate event-loop turn so the UI stays
+        # responsive and QMediaPlayer / pandas file handles don't race.
+
+        # Step 1 — 100 ms: metrics JSON (fast; makes the badge appear quickly)
+        def _load_metrics() -> None:
+            if metrics_json.exists():
+                self.metrics_panel.load_metrics(str(metrics_json))
+
+        # Step 2 — 300 ms: final smoothed angle curves into chart
+        def _load_chart() -> None:
             if angles_csv.exists():
                 self.chart_panel.load_angles(str(angles_csv))
 
-        # Step 3 (300 ms) — gait detection (scipy, pure-numpy, non-critical)
-        def _load_gait():
+        # Step 3 — 600 ms: gait detection + video player init (heaviest pair)
+        # Gait must come after chart so add_gait_regions paints over solid curves.
+        # Video is last so QMediaPlayer gets a fully-flushed .mp4.
+        def _load_gait_and_video() -> None:
             if angles_csv.exists():
                 self._run_gait_detection(angles_csv)
 
-        # Step 4 (500 ms) — QMediaPlayer init (heaviest; must come last)
-        def _load_video():
             diagnostic_mp4 = out / "diagnostic.mp4"
             if diagnostic_mp4.exists():
                 self.video_panel.load_video(str(diagnostic_mp4))
@@ -219,11 +245,14 @@ class MainWindow(QMainWindow):
                 src = self.control_panel.video_path()
                 if src:
                     self.video_panel.load_video(src)
+
+            # Re-enable Run button and reset status only after all loading done
+            self.control_panel.set_running(False)
             self._set_status(f"Analysis complete  \u2014  {out_dir}")
 
-        QTimer.singleShot(100, _load_chart)
-        QTimer.singleShot(300, _load_gait)
-        QTimer.singleShot(500, _load_video)
+        QTimer.singleShot(100, _load_metrics)
+        QTimer.singleShot(300, _load_chart)
+        QTimer.singleShot(600, _load_gait_and_video)
 
     def _run_gait_detection(self, angles_csv: Path) -> None:
         """
@@ -245,6 +274,7 @@ class MainWindow(QMainWindow):
 
             knee_deg = df[knee_col].to_numpy(dtype=float)
             cycles   = detect_gait_cycles(knee_deg, t, fps=self._video_fps)
+            self._last_gait_cycles = cycles
             self.chart_panel.add_gait_regions(cycles)
 
             if cycles.n_strides > 0:
@@ -259,9 +289,67 @@ class MainWindow(QMainWindow):
             print(f"Gait detection skipped: {exc}")
 
     def _on_error(self, message: str) -> None:
+        self._disconnect_worker()
+        if self._worker is not None:
+            _w = self._worker
+            self._worker = None
+            QTimer.singleShot(0, lambda: (_w.wait(), _w.deleteLater()))
         self.control_panel.set_running(False)
         self._global_progress.setValue(0)
         self._set_status(f"Error: {message}")
+
+    def _export_pdf(self) -> None:
+        """Export a branded PDF report for the most recent analysis."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+
+        if not self._last_out_dir:
+            QMessageBox.warning(self, "No Analysis", "Run an analysis first.")
+            return
+
+        # Suggest a default filename inside the output directory
+        default_path = str(Path(self._last_out_dir) / "reports" / "drocap_report.pdf")
+        pdf_path, _ = QFileDialog.getSaveFileName(
+            self, "Save PDF Report", default_path,
+            "PDF Files (*.pdf);;All Files (*)"
+        )
+        if not pdf_path:
+            return
+
+        self._set_status("Generating PDF report\u2026")
+        try:
+            from app.utils.report_gen import generate_report
+
+            # Load metrics dict for the report
+            metrics_json = Path(self._last_out_dir) / "reports" / "metrics_mocap.json"
+            metrics_data: dict | None = None
+            if metrics_json.exists():
+                import json
+                payload = json.loads(metrics_json.read_text())
+                metrics_data = payload.get("metrics")
+
+            out = generate_report(
+                out_path         = pdf_path,
+                chart_panel      = self.chart_panel,
+                gait_cycles      = self._last_gait_cycles,
+                metrics          = metrics_data,
+                video_path       = self.control_panel.video_path(),
+                athlete_height_m = None,
+            )
+            self._set_status(f"Report saved  \u2014  {out}")
+            QMessageBox.information(
+                self, "Report Saved",
+                f"PDF report written to:\n{out}"
+            )
+        except ImportError:
+            QMessageBox.critical(
+                self, "Missing Dependency",
+                "reportlab is required for PDF export.\n\n"
+                "Install it with:\n  pip install reportlab"
+            )
+            self._set_status("PDF export failed — reportlab not installed.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Failed", str(exc))
+            self._set_status(f"PDF export failed: {exc}")
 
     def _set_status(self, msg: str) -> None:
         self._status_msg.setText(msg)
