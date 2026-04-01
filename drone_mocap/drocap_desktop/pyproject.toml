@@ -20,3 +20,8 @@ drocap-desktop = "main:main"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pyinstaller (>=6.19.0,<7.0.0)"
+]
